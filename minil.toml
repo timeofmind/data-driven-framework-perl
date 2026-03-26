@@ -1,0 +1,5 @@
+name = "DataDriven-Framework"
+license = "Apache_2_0"
+
+[build]
+script_files = ["bin/ddframework"]

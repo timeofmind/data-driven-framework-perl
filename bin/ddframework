@@ -1,0 +1,412 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+use FindBin qw($Bin);
+use lib "$Bin/../lib";
+
+use Getopt::Long qw(:config pass_through no_ignore_case);
+use Term::ANSIColor qw(colored);
+use Carp qw(croak);
+use File::Path qw(make_path);
+
+our $VERSION = '0.01';
+
+my $command = shift @ARGV // 'help';
+
+my %commands = (
+    'validate'            => \&cmd_validate,
+    'generate-sql'        => \&cmd_generate_sql,
+    'reverse-from-db'     => \&cmd_reverse_from_db,
+    'generate-openapi'    => \&cmd_generate_openapi,
+    'generate-json-schema'=> \&cmd_generate_json_schema,
+    'generate-ui'         => \&cmd_generate_ui,
+    'generate-docs'       => \&cmd_generate_docs,
+    'diff'                => \&cmd_diff,
+    'migrate'             => \&cmd_migrate,
+    'init-project'        => \&cmd_init_project,
+    'sandbox-info'        => \&cmd_sandbox_info,
+    'help'                => \&cmd_help,
+    'version'             => \&cmd_version,
+);
+
+if (exists $commands{$command}) {
+    $commands{$command}->();
+} else {
+    err("Unknown command: $command");
+    cmd_help();
+    exit 1;
+}
+
+# ============================================================
+# Commands
+# ============================================================
+
+sub cmd_validate {
+    my ($schema, $quiet);
+    GetOptions('schema|s=s' => \$schema, 'quiet|q' => \$quiet)
+        or usage_die('validate', '--schema <file>');
+    $schema or usage_die('validate', '--schema <file>');
+
+    my $model = load_and_resolve($schema);
+    ok("Schema '$schema' is valid");
+    ok("  Schema version:    " . $model->schema_version);
+    ok("  Classes:           " . scalar($model->class_names));
+    ok("  Enums:             " . scalar($model->enum_names));
+    ok("  Model hash:        " . $model->model_hash);
+}
+
+sub cmd_generate_sql {
+    my ($schema, $output);
+    GetOptions('schema|s=s' => \$schema, 'output|o=s' => \$output)
+        or usage_die('generate-sql', '--schema <file> [--output <file.sql>]');
+    $schema or usage_die('generate-sql', '--schema <file>');
+
+    require DataDriven::Framework::Generator::SQL;
+    my $model = load_and_resolve($schema);
+    my $gen   = DataDriven::Framework::Generator::SQL->new(model => $model);
+    my $sql   = $gen->generate;
+
+    if ($output) {
+        write_file($output, $sql);
+        ok("SQL written to $output");
+    } else {
+        print $sql;
+    }
+}
+
+sub cmd_reverse_from_db {
+    my ($dsn, $user, $pass, $schema_name, $output);
+    GetOptions(
+        'dsn=s'    => \$dsn,
+        'user|u=s' => \$user,
+        'pass|p=s' => \$pass,
+        'schema=s' => \$schema_name,
+        'output|o=s' => \$output,
+    ) or usage_die('reverse-from-db', '--dsn <dsn> --user <u> --pass <p> [--output <file.yaml>]');
+    $dsn  or usage_die('reverse-from-db', '--dsn <dsn>');
+    $user or usage_die('reverse-from-db', '--user <user>');
+
+    require DBI;
+    require DataDriven::Framework::Reverse::FromDB;
+    my $dbh = DBI->connect($dsn, $user, $pass // '', { RaiseError => 1, PrintError => 0 })
+        or die "Cannot connect: $DBI::errstr\n";
+
+    my $rev  = DataDriven::Framework::Reverse::FromDB->new(
+        dbh    => $dbh,
+        schema => $schema_name,
+    );
+    my $yaml = $rev->generate_yaml;
+    $dbh->disconnect;
+
+    if ($output) {
+        write_file($output, $yaml);
+        ok("YAML schema written to $output");
+    } else {
+        print $yaml;
+    }
+}
+
+sub cmd_generate_openapi {
+    my ($schema, $output, $title, $version, $base);
+    GetOptions(
+        'schema|s=s'  => \$schema,
+        'output|o=s'  => \$output,
+        'title=s'     => \$title,
+        'version=s'   => \$version,
+        'base-path=s' => \$base,
+    ) or usage_die('generate-openapi', '--schema <file> [--output <file.yaml>]');
+    $schema or usage_die('generate-openapi', '--schema <file>');
+
+    require DataDriven::Framework::Generator::OpenAPI;
+    my $model = load_and_resolve($schema);
+    my $gen   = DataDriven::Framework::Generator::OpenAPI->new(
+        model       => $model,
+        ($title   ? (api_title   => $title)   : ()),
+        ($version ? (api_version => $version) : ()),
+        ($base    ? (base_path   => $base)    : ()),
+    );
+    my $yaml = $gen->generate_yaml;
+
+    if ($output) {
+        write_file($output, $yaml);
+        ok("OpenAPI spec written to $output");
+    } else {
+        print $yaml;
+    }
+}
+
+sub cmd_generate_json_schema {
+    my ($schema, $output);
+    GetOptions('schema|s=s' => \$schema, 'output|o=s' => \$output)
+        or usage_die('generate-json-schema', '--schema <file> [--output <file.json>]');
+    $schema or usage_die('generate-json-schema', '--schema <file>');
+
+    require DataDriven::Framework::Generator::JSONSchema;
+    my $model = load_and_resolve($schema);
+    my $gen   = DataDriven::Framework::Generator::JSONSchema->new(model => $model);
+    my $json  = $gen->generate_json;
+
+    if ($output) {
+        write_file($output, $json);
+        ok("JSON Schema written to $output");
+    } else {
+        print $json, "\n";
+    }
+}
+
+sub cmd_generate_ui {
+    my ($schema, $output);
+    GetOptions('schema|s=s' => \$schema, 'output|o=s' => \$output)
+        or usage_die('generate-ui', '--schema <file> --output <dir>');
+    $schema && $output or usage_die('generate-ui', '--schema <file> --output <dir>');
+
+    require DataDriven::Framework::Generator::UI;
+    my $model = load_and_resolve($schema);
+    my $gen   = DataDriven::Framework::Generator::UI->new(model => $model, output_dir => $output);
+    my @files = $gen->generate;
+
+    ok("UI files written to $output:");
+    ok("  $_") for @files;
+}
+
+sub cmd_generate_docs {
+    my ($schema, $output);
+    GetOptions('schema|s=s' => \$schema, 'output|o=s' => \$output)
+        or usage_die('generate-docs', '--schema <file> --output <dir>');
+    $schema && $output or usage_die('generate-docs', '--schema <file> --output <dir>');
+
+    require DataDriven::Framework::Generator::Docs;
+    my $model = load_and_resolve($schema);
+    my $gen   = DataDriven::Framework::Generator::Docs->new(model => $model, output_dir => $output);
+    my @files = $gen->generate;
+
+    ok("Documentation written to $output:");
+    ok("  $_") for @files;
+}
+
+sub cmd_diff {
+    my ($from, $to, $sql_out, $summary_out);
+    GetOptions(
+        'from=s'    => \$from,
+        'to=s'      => \$to,
+        'output|o=s'        => \$sql_out,
+        'summary-output=s'  => \$summary_out,
+    ) or usage_die('diff', '--from <schema_v1.yaml> --to <schema_v2.yaml> [--output migration.sql]');
+    $from && $to or usage_die('diff', '--from <schema_v1.yaml> --to <schema_v2.yaml>');
+
+    require DataDriven::Framework::Generator::Migration;
+    my $from_model = load_and_resolve($from);
+    my $to_model   = load_and_resolve($to);
+
+    my $migrator = DataDriven::Framework::Generator::Migration->new(
+        from_model => $from_model,
+        to_model   => $to_model,
+    );
+
+    my $sql     = $migrator->generate_sql;
+    my $summary = $migrator->generate_summary;
+
+    if ($sql_out) {
+        write_file($sql_out, $sql);
+        ok("Migration SQL written to $sql_out");
+    } else {
+        print $sql;
+    }
+
+    if ($summary_out) {
+        write_file($summary_out, $summary);
+        ok("Migration summary written to $summary_out");
+    } else {
+        print STDERR "\n$summary\n";
+    }
+}
+
+sub cmd_migrate {
+    my ($dsn, $user, $pass, $migration);
+    GetOptions(
+        'dsn=s'       => \$dsn,
+        'user|u=s'    => \$user,
+        'pass|p=s'    => \$pass,
+        'migration=s' => \$migration,
+    ) or usage_die('migrate', '--dsn <dsn> --user <u> --migration <file.sql>');
+    $dsn && $user && $migration
+        or usage_die('migrate', '--dsn <dsn> --user <u> --migration <file.sql>');
+
+    require DBI;
+    my $dbh = DBI->connect($dsn, $user, $pass // '', { RaiseError => 1 })
+        or die "Cannot connect: $DBI::errstr\n";
+
+    open my $fh, '<', $migration or die "Cannot open $migration: $!\n";
+    my $sql = do { local $/; <$fh> };
+    close $fh;
+
+    $dbh->do("SET FOREIGN_KEY_CHECKS = 0");
+    for my $stmt (split /;\s*\n/, $sql) {
+        $stmt =~ s/^\s+|\s+$//g;
+        next unless length($stmt) > 5;
+        next if $stmt =~ /^--/;
+        next if $stmt =~ /^SET\s+FOREIGN/i;
+        eval { $dbh->do($stmt) };
+        warn "Warning on: $stmt\n  $@\n" if $@;
+    }
+    $dbh->do("SET FOREIGN_KEY_CHECKS = 1");
+    $dbh->disconnect;
+    ok("Migration applied from $migration");
+}
+
+sub cmd_init_project {
+    my ($name, $output);
+    GetOptions('name|n=s' => \$name, 'output|o=s' => \$output)
+        or usage_die('init-project', '--name <ProjectName> [--output <dir>]');
+    $name or usage_die('init-project', '--name <ProjectName>');
+    $output //= lc($name);
+
+    make_path("$output/schema");
+    make_path("$output/t");
+
+    my $schema_file = "$output/schema/main.yaml";
+    unless (-f $schema_file) {
+        write_file($schema_file, <<YAML);
+schema_version: "1.0.0"
+framework_version: "0.01"
+description: "$name schema"
+
+enums:
+  Status:
+    values: [active, inactive]
+    default: active
+
+classes:
+  Item:
+    label: Item
+    description: "An example entity"
+    slots:
+      - name: id
+        type: integer
+        autogenerated: true
+        read_only: true
+        required: true
+      - name: name
+        type: string
+        required: true
+        label: Name
+      - name: status
+        type: enum
+        enum: Status
+        default: active
+    constraints:
+      unique: [name]
+YAML
+        ok("Schema written to $schema_file");
+    }
+
+    write_file("$output/t/01_schema.t", <<PERL);
+use strict;
+use warnings;
+use Test::More;
+use lib '../lib';
+use DataDriven::Framework::Sandbox::TestHelper qw(schema_valid_ok);
+
+schema_valid_ok('schema/main.yaml', 'main schema is valid');
+
+done_testing;
+PERL
+    ok("Test written to $output/t/01_schema.t");
+    ok("Project '$name' initialized in $output/");
+    ok("Run: ddframework validate --schema $schema_file");
+}
+
+sub cmd_sandbox_info {
+    ok("DataDriven::Framework Sandbox");
+    ok("  Version: $VERSION");
+    ok("  Use DataDriven::Framework::Sandbox::Environment for test isolation");
+    ok("  Use DataDriven::Framework::Sandbox::TestHelper for Test::More helpers");
+    ok("  SQLite in-memory mode available for tests (use_sqlite => 1)");
+}
+
+sub cmd_version {
+    print "ddframework $VERSION\n";
+    print "DataDriven::Framework $VERSION\n";
+}
+
+sub cmd_help {
+    my $cmd = shift @ARGV // '';
+    print <<HELP;
+ddframework - DataDriven::Framework CLI v$VERSION
+
+Usage: ddframework <command> [options]
+
+Commands:
+  validate              Validate a schema file
+  generate-sql          Generate MySQL DDL from schema
+  reverse-from-db       Generate YAML schema from an existing database
+  generate-openapi      Generate OpenAPI 3.0 spec from schema
+  generate-json-schema  Generate JSON Schema from schema
+  generate-ui           Generate UI scaffold from schema
+  generate-docs         Generate Markdown documentation from schema
+  diff                  Generate SQL migration between two schema versions
+  migrate               Apply a migration SQL file to a database
+  init-project          Initialize a new project skeleton
+  sandbox-info          Show sandbox/testing utilities info
+  version               Show version
+  help                  Show this help
+
+Options (common):
+  --schema, -s <file>   Schema YAML file
+  --output, -o <file>   Output file or directory
+
+Examples:
+  ddframework validate --schema schema/myapp.yaml
+  ddframework generate-sql --schema schema/myapp.yaml --output schema.sql
+  ddframework generate-openapi --schema schema/myapp.yaml --output openapi.yaml
+  ddframework diff --from schema/v1.yaml --to schema/v2.yaml --output migration.sql
+  ddframework init-project --name MyApp --output myapp/
+HELP
+}
+
+# ============================================================
+# Helpers
+# ============================================================
+
+sub load_and_resolve {
+    my ($schema_path) = @_;
+    require DataDriven::Framework::Schema::Parser;
+    require DataDriven::Framework::Schema::Resolver;
+    require DataDriven::Framework::Schema::Validator;
+
+    my $parser   = DataDriven::Framework::Schema::Parser->new;
+    my $model    = eval { $parser->parse($schema_path) };
+    die colored("Error parsing $schema_path: $@", 'red') . "\n" if $@;
+
+    my $resolver = DataDriven::Framework::Schema::Resolver->new;
+    eval { $resolver->resolve($model) };
+    die colored("Error resolving $schema_path: $@", 'red') . "\n" if $@;
+
+    my $validator = DataDriven::Framework::Schema::Validator->new;
+    my @errors    = $validator->validate($model);
+    if (@errors) {
+        err("Validation errors in $schema_path:");
+        err("  $_") for @errors;
+        exit 1;
+    }
+
+    return $model;
+}
+
+sub write_file {
+    my ($path, $content) = @_;
+    (my $dir = $path) =~ s{/[^/]+$}{};
+    make_path($dir) if $dir && $dir ne $path;
+    open my $fh, '>', $path or die "Cannot write $path: $!\n";
+    print $fh $content;
+    close $fh;
+}
+
+sub ok  { print colored($_[0], 'green') . "\n" }
+sub err { print STDERR colored($_[0], 'red') . "\n" }
+
+sub usage_die {
+    my ($cmd, $usage) = @_;
+    err("Usage: ddframework $cmd $usage");
+    exit 1;
+}

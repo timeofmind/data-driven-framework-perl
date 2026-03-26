@@ -1,0 +1,27 @@
+# Minilla build artifacts
+/.build/
+*.tar.gz
+MANIFEST
+MANIFEST.bak
+META.json
+META.yml
+Build
+Build.PL
+Makefile
+blib/
+_build/
+
+# Perl
+*.bak
+*.orig
+cover_db/
+nytprof/
+nytprof.out
+*.gcov
+*.gcda
+*.gcno
+
+# Editor
+.DS_Store
+*.swp
+*~
