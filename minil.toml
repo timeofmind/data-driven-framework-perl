@@ -1,5 +1,6 @@
 name = "DataDriven-Framework"
 license = "Apache_2_0"
+module_maker = "ModuleBuildTiny"
 
 [build]
 script_files = ["bin/ddframework"]

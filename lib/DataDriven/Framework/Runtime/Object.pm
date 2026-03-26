@@ -18,8 +18,9 @@ sub _register_meta {
 sub _meta {
     my ($self_or_class) = @_;
     my $class = blessed($self_or_class) // $self_or_class;
-    return $_class_meta{$class}
-        or croak "No metadata registered for class '$class'";
+    my $meta = $_class_meta{$class};
+    croak "No metadata registered for class '$class'" unless defined $meta;
+    return $meta;
 }
 
 sub _model_class {
